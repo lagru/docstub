@@ -24,7 +24,19 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 def try_format_stub(stub: str) -> str:
-    """Try to format a stub file with isort and black if available."""
+    """Try to format a stub file with isort and black if available.
+
+    Calls isort and black wiht their standard configuration if they are
+    available.
+    """
+
+    # TODO This seems faster even though we invoke a subprocess?
+    #  But `ruff format` doesn't sort imports...
+    # output = subprocess.check_output(
+    #     ["/usr/bin/ruff", "format", "-"], input=stub, text=True
+    # )
+    # return output
+
     try:
         import isort  # noqa: PLC0415
 
@@ -324,13 +336,15 @@ class Py2StubTransformer(cst.CSTTransformer):
     )
     _Annotation_None: ClassVar[cst.Annotation] = cst.Annotation(cst.Name("None"))
 
-    def __init__(self, *, matcher=None):
+    def __init__(self, *, matcher=None, doctype_transpiler=None):
         """
         Parameters
         ----------
         matcher : ~.TypeMatcher
+        doctype_transpiler : ~.DoctypeTranspiler, optional
         """
         self.matcher = matcher
+        self.doctype_transpiler = doctype_transpiler
         self.reporter = ContextReporter(logger=logger)
         self.stats = Stats()
         # Relevant docstring for the current context
@@ -917,6 +931,7 @@ class Py2StubTransformer(cst.CSTTransformer):
                     matcher=self.matcher,
                     reporter=reporter,
                     stats=self.stats,
+                    doctype_transpiler=self.doctype_transpiler,
                 )
             except (SystemExit, KeyboardInterrupt):
                 raise

@@ -4,6 +4,7 @@ Its interface declaration is in ``_cli.py``. Splitting declaration and
 implementation (with slow imports) speeds up the ``--help`` option.
 """
 
+import importlib.util
 import logging
 import sys
 import time
@@ -11,6 +12,9 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
+import pluggy
+
+from . import doctype, plugins
 from ._analysis import (
     PyImport,
     TypeCollector,
@@ -28,6 +32,7 @@ from ._path_utils import (
 )
 from ._report import Stats, setup_logging
 from ._stubs import Py2StubTransformer, try_format_stub
+from ._utils import escape_qualname
 from ._version import __version__
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -60,8 +65,8 @@ def _load_configuration(config_paths=None):
 
     if config_paths:
         for path in config_paths:
-            logger.info("Using %s", path)
             add_config = Config.from_toml(path)
+            logger.info("Using %s", path)
             config = config.merge(add_config)
 
     else:
@@ -73,11 +78,67 @@ def _load_configuration(config_paths=None):
 
         docstub_toml = Path.cwd() / "docstub.toml"
         if docstub_toml.is_file():
-            logger.info("Using %s", docstub_toml)
             add_config = Config.from_toml(docstub_toml)
+            logger.info("Using %s", docstub_toml)
             config = config.merge(add_config)
 
     return config
+
+
+def _import_standalone_module_from_path(path, *, module_name=None):
+    """Import standalone module at the given file path.
+
+    "Standalone" because relative imports inside the loaded module may not work?
+
+    Parameters
+    ----------
+    path : Path
+        Path to a Python file.
+    module_name : str, optional
+        The name to load the module as. Derived from `path` if not provided.
+        The functions raises if such a module already exists in :mod:`sys.modules`.
+
+    Returns
+    -------
+    module : ModuleType
+    """
+    module_name = module_name or escape_qualname(str(path))
+    if module_name in sys.modules:
+        raise RuntimeError(f"module {module_name} already defined")
+
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_plugins(paths=()):
+    """Load plugins for docstub.
+
+    Parameters
+    ----------
+    paths : Iterable of Path(s)
+        File paths to load plugins from.
+
+    Returns
+    -------
+    manager : pluggy.PluginManager
+    """
+    manager = pluggy.PluginManager("docstub")
+    manager.add_hookspecs(plugins)
+
+    # Loading plugins via entrypoints is intentionally not supported (for now)
+    # manager.load_setuptools_entrypoints("docstub")
+
+    for path in paths:
+        plugin_module = _import_standalone_module_from_path(path)
+        manager.register(plugin_module)
+        hooks = manager.get_hookcallers(plugin_module)
+        logger.info("Registered plugin at %s (%i hook(s))", path, len(hooks))
+        logger.debug("Hooks implemented by plugin at %s:\n%r", path, hooks)
+
+    return manager
 
 
 def _collect_type_info(root_path, *, ignore=(), cache=False):
@@ -237,7 +298,9 @@ def _generate_single_stub(task):
         fo.write(stub_content)
 
     stats = Stats.merge(
-        stub_transformer.stats.pop_all(), stub_transformer.matcher.stats.pop_all()
+        stub_transformer.stats.pop_all(),
+        stub_transformer.matcher.stats.pop_all(),
+        stub_transformer.doctype_transpiler.stats.pop_all(),
     )
 
     return stats
@@ -298,6 +361,9 @@ def generate_stubs(
     config = config.merge(Config(ignore_files=list(ignore)))
     logger.debug("Fully loaded config:\n%s", config)
 
+    plugin_manager = _load_plugins(config.plugin_paths)
+    plugin_hooks = plugin_manager.hook
+
     types, type_prefixes = _collect_type_info(
         root_path, ignore=config.ignore_files, cache=not no_cache
     )
@@ -318,10 +384,17 @@ def generate_stubs(
         for prefix, module in config.type_prefixes.items()
     }
 
+    grammar = plugin_hooks.docstub_load_doctype_grammar()
+    doctype_transformer = plugin_hooks.docstub_load_doctype_transformer()
+    doctype_transpiler = doctype.DoctypeTranspiler(
+        grammar=grammar, transformer=doctype_transformer
+    )
     matcher = TypeMatcher(
         types=types, type_prefixes=type_prefixes, type_nicknames=config.type_nicknames
     )
-    stub_transformer = Py2StubTransformer(matcher=matcher)
+    stub_transformer = Py2StubTransformer(
+        matcher=matcher, doctype_transpiler=doctype_transpiler
+    )
 
     if not out_dir:
         if root_path.is_file():
@@ -373,13 +446,17 @@ def generate_stubs(
         output_handler.group_errors = False
 
     # Report basic statistics
+    logger.debug(
+        "DoctypeTranspiler caching stats: hits=%i, misses=%i, maxsize=%i",
+        stats.pop("doctype_transpiler_cache_hits", 0),
+        stats.pop("doctype_transpiler_cache_misses", 0),
+        max(stats.pop("doctype_transpiler_curr_cache_size", [0])),
+    )
+    logger.info("Recognized type names: %i", stats.pop("matched_type_names", 0))
+    logger.info("Transformed doctypes: %i", stats.pop("transformed_doctypes", 0))
+
     total_warnings = error_counter.warning_count
     total_errors = error_counter.error_count
-
-    logger.info("Recognized type names: %i", stats.pop("matched_type_names", default=0))
-    logger.info(
-        "Transformed doctypes: %i", stats.pop("transformed_doctypes", default=0)
-    )
     if total_warnings:
         logger.warning("Warnings: %i", total_warnings)
     if "doctype_syntax_errors" in stats:

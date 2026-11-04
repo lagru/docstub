@@ -1,13 +1,21 @@
 import logging
+from itertools import product
 
 import lark
 import lark.exceptions
 import pytest
 
-from docstub._doctype import BLACKLISTED_QUALNAMES, parse_doctype
+from docstub.doctype import (
+    BLACKLISTED_QUALNAMES,
+    DoctypeTransformer,
+    DoctypeTranspiler,
+    Expr,
+    Term,
+    insert_between,
+)
 
 
-class Test_parse_doctype:
+class Test_DoctypeTranspiler:
     @pytest.mark.parametrize(
         "doctype",
         [
@@ -27,12 +35,12 @@ class Test_parse_doctype:
     )
     def test_edge_case_errors(self, doctype):
         with pytest.raises(lark.exceptions.UnexpectedInput):
-            parse_doctype(doctype)
+            DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize("doctype", BLACKLISTED_QUALNAMES)
     def test_reserved_keywords(self, doctype):
         with pytest.raises(lark.exceptions.VisitError):
-            parse_doctype(doctype)
+            DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -42,7 +50,7 @@ class Test_parse_doctype:
         ],
     )
     def test_natlang_union(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
 
     @pytest.mark.parametrize(
@@ -67,7 +75,7 @@ class Test_parse_doctype:
         ],
     )
     def test_subscription(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
 
     @pytest.mark.parametrize(
@@ -93,7 +101,7 @@ class Test_parse_doctype:
         ],
     )
     def test_natlang_container(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
 
     @pytest.mark.parametrize(
@@ -113,7 +121,7 @@ class Test_parse_doctype:
     )
     def test_subscription_error(self, doctype):
         with pytest.raises(lark.exceptions.UnexpectedInput):
-            parse_doctype(doctype)
+            DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize(
         ("doctype"),
@@ -136,7 +144,7 @@ class Test_parse_doctype:
         ],
     )
     def test_literals(self, doctype):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
         assert "literal" in [e.rule for e in expr.sub_expressions]
 
@@ -167,12 +175,12 @@ class Test_parse_doctype:
         ],
     )
     def test_natlang_literals(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
         assert "natlang_literal" in [e.rule for e in expr.sub_expressions]
 
     def test_single_natlang_literal_warning(self, caplog):
-        expr = parse_doctype("{True}")
+        expr = DoctypeTranspiler()("{True}")
         assert expr.as_code() == "Literal[True]"
         assert caplog.messages == ["Natural language literal with one item: `{True}`"]
         assert caplog.records[0].levelno == logging.WARNING
@@ -205,7 +213,7 @@ class Test_parse_doctype:
     )
     def test_optional_info(self, doctype, expected, optional_info):
         doctype_with_optional = doctype + optional_info
-        expr = parse_doctype(doctype_with_optional)
+        expr = DoctypeTranspiler()(doctype_with_optional)
         assert expr.as_code() == expected
 
     @pytest.mark.parametrize(
@@ -220,7 +228,7 @@ class Test_parse_doctype:
         ],
     )
     def test_callable(self, doctype):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
         assert "callable" in [e.rule for e in expr.sub_expressions]
 
@@ -233,7 +241,7 @@ class Test_parse_doctype:
         ],
     )
     def test_callable_subscriptions_form(self, doctype):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
         assert "callable" not in [e.rule for e in expr.sub_expressions]
 
@@ -247,7 +255,7 @@ class Test_parse_doctype:
     )
     def test_callable_error(self, doctype):
         with pytest.raises(lark.exceptions.UnexpectedInput):
-            parse_doctype(doctype)
+            DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -261,7 +269,7 @@ class Test_parse_doctype:
         ],
     )
     def test_rst_role(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
 
     # fmt: off
@@ -280,7 +288,7 @@ class Test_parse_doctype:
     def test_natlang_array(self, fmt, expected_fmt, name, dtype, shape):
         doctype = fmt.format(name=name, dtype=dtype, shape=shape)
         expected = expected_fmt.format(name=name, dtype=dtype, shape=shape)
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
         assert "natlang_array" in [e.rule for e in expr.sub_expressions]
     # fmt: on
@@ -293,7 +301,7 @@ class Test_parse_doctype:
         ],
     )
     def test_natlang_array_specific(self, doctype, expected):
-        expr = parse_doctype(doctype)
+        expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
         assert "natlang_array" in [e.rule for e in expr.sub_expressions]
 
@@ -301,4 +309,201 @@ class Test_parse_doctype:
     def test_natlang_array_invalid_shape(self, shape):
         doctype = f"array of shape {shape}"
         with pytest.raises(lark.exceptions.UnexpectedInput):
-            _ = parse_doctype(doctype)
+            _ = DoctypeTranspiler()(doctype)
+
+
+class Test_DoctypeTranspiler_override:
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("ndarray of dtype uint8 or int", "ndarray[uint8] | int"),
+            ("ndarray of dtype in {uint8, uint16}", "ndarray[uint8 | uint16]"),
+            # ("ndarray of dtype (uint8, uint16)", "ndarray[uint8 | uint16]"),
+        ],
+    )
+    def test_in_dtype(self, doctype, expected):
+        grammar = """
+        %import doctype (start, dtype, qualname, WS_INLINE)
+        dtype_union : "in {" qualname ("," qualname)+ "}" -> union
+        %override dtype: qualname | dtype_union
+        %ignore WS_INLINE
+        """
+        transpile = DoctypeTranspiler(grammar=grammar)
+        expr = transpile(doctype)
+        assert expr.as_code() == expected
+        assert "natlang_array" in [e.rule for e in expr.sub_expressions]
+        assert "dtype" in [e.rule for e in expr.sub_expressions]
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("my_array of dtype int", "my_array[int]"),
+            ("my_array of shape (4, 4)", "my_array"),
+        ],
+    )
+    def test_doc_example_new_array_name(self, doctype, expected):
+        grammar = """
+        %import doctype (start, WS_INLINE, ARRAY_NAME)
+        %extend ARRAY_NAME: "my_array"
+        %ignore WS_INLINE
+        """
+        transpile = DoctypeTranspiler(grammar=grammar)
+        expr = transpile(doctype)
+        assert expr.as_code() == expected
+        assert len(list(expr.filter(rule="natlang_array"))) == 1
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("int or float or complex", "complex | float | int"),
+            ("int or tuple[int or float, ...]", "int | tuple[float | int, ...]"),
+        ],
+    )
+    def test_transformer_only(self, doctype, expected):
+        @lark.visitors.v_args(tree=True)
+        class Transformer(DoctypeTransformer):
+            def union(self, tree):
+                # Sort items in union alphabetically
+                tree.children = sorted(tree.children, key=str)
+                out = super().union(tree)
+                return out
+
+        transpile = DoctypeTranspiler(transformer=Transformer())
+        expr = transpile(doctype)
+        assert expr.as_code() == expected
+        assert "union" in [e.rule for e in expr.sub_expressions]
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("(int) -> bool", "Callable[[int], bool]"),
+            ("(str, bytes) -> int or bool", "Callable[[str, bytes], int | bool]"),
+        ],
+    )
+    def test_natlang_callable(self, doctype, expected):
+        grammar = """
+        %import doctype (start, _type, WS_INLINE)
+        params: _type ("," _type)*
+        natlang_callable : "(" params ") ->" _type
+        %extend _type: natlang_callable
+        %ignore WS_INLINE
+        """
+
+        class Transformer(lark.visitors.Transformer):
+            def start(self, children):
+                return Expr(rule="start", children=tuple(children))
+
+            def params(self, children):
+                sep = Term(", ", kind="syntax")
+                content = insert_between(children, sep=sep)
+                items = [
+                    Term("[", kind="syntax"),
+                    *content,
+                    Term("]", kind="syntax"),
+                ]
+                out = Expr(rule="params", children=tuple(items))
+                return out
+
+            def natlang_callable(self, children):
+                items = [Term("Callable", kind="name"), *children]
+                out = DoctypeTransformer._format_subscription(
+                    items, rule="natlang_callable"
+                )
+                return out
+
+        transpile = DoctypeTranspiler(grammar=grammar, transformer=Transformer())
+        expr = transpile(doctype)
+        assert expr.as_code() == expected
+        assert "natlang_callable" in [e.rule for e in expr.sub_expressions]
+        assert "params" in [e.rule for e in expr.sub_expressions]
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("{Iterable, Sequence} of int(s)", "Iterable[int] | Sequence[int]"),
+            (
+                "{list, set} of {int, float}",
+                "list[int] | list[float] | set[int] | set[float]",
+            ),
+        ],
+    )
+    def test_expansion_of_qualnames(self, doctype, expected):
+        grammar = """
+        %import doctype (start, WS_INLINE, qualname)
+        %extend qualname: "{" qualname ("," qualname)+ "}" -> expansion
+        %ignore WS_INLINE
+        """
+
+        @lark.visitors.v_args(tree=True)
+        class ExpansionTransformer(DoctypeTransformer):
+            def start(self, tree):
+                """Transform "start" rule.
+
+                Parameters
+                ----------
+                tree : lark.Tree
+
+                Returns
+                -------
+                expr : Expr
+                """
+                children = map(self._expand_expression, tree.children)
+                return Expr(rule="start", children=tuple(children))
+
+            def expansion(self, tree):
+                """Transform "expansion" rule.
+
+                Actual expansion happens in `start` when the complete expression with
+                all potential expansions can be seen.
+
+                Parameters
+                ----------
+                tree : lark.Tree
+
+                Returns
+                -------
+                expr : Expr
+                """
+                return Expr(rule="expansion", children=tuple(tree.children))
+
+            def _expand_expression(self, expr):
+                """Join combination of all expansions in a new union.
+
+                Parameters
+                ----------
+                expr : Expr
+
+                Returns
+                -------
+                expanded : Expr
+                """
+                expansions = expr.filter(rule="expansion")
+                if not expansions:
+                    return expr
+
+                # Create Cartesian product of all expansions where each
+                # value is prefixed by the expansion it will replace
+                expansions = [
+                    [(expansion, value) for value in expansion.children]
+                    for expansion in expansions
+                ]
+                combinations = list(product(*expansions))
+
+                # Create a new expression for each combination
+                interpolated = []
+                for combination in combinations:
+                    new_expr = expr
+                    for expansion, value in combination:
+                        new_expr = new_expr.replace(expansion, value)
+                    interpolated.append(new_expr)
+
+                # Join new expressions as union
+                expanded = self.union(lark.Tree("union", children=interpolated))
+                return expanded
+
+        transpile = DoctypeTranspiler(
+            grammar=grammar, transformer=ExpansionTransformer()
+        )
+        expr = transpile(doctype)
+        assert expr.as_code() == expected
+        assert list(expr.filter(rule="natlang_array")) == []

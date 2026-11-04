@@ -21,6 +21,7 @@ class Config:
     type_prefixes: dict[str, str] = dataclasses.field(default_factory=dict)
     type_nicknames: dict[str, str] = dataclasses.field(default_factory=dict)
     ignore_files: list[str] = dataclasses.field(default_factory=list)
+    plugin_paths: list[Path] = dataclasses.field(default_factory=list)
 
     config_paths: tuple[Path, ...] = ()
 
@@ -36,10 +37,25 @@ class Config:
         -------
         config : Self
         """
-        path = Path(path)
+        path = Path(path).resolve()
         with open(path, "rb") as fp:
             raw = tomllib.load(fp)
-        config = cls(**raw.get("tool", {}).get("docstub", {}), config_paths=(path,))
+
+        docstub_table = raw.get("tool", {}).get("docstub", {})
+        toml_dir = path.parent
+
+        def normalize_plugin_paths(p):
+            p = Path(p)
+            if not p.is_absolute():
+                p = toml_dir / str(p)
+            p = p.resolve()
+            return p
+
+        plugin_paths = docstub_table.get("plugin_paths", [])
+        plugin_paths = [normalize_plugin_paths(p) for p in plugin_paths]
+        docstub_table["plugin_paths"] = plugin_paths
+
+        config = cls(**docstub_table, config_paths=(path,))
         logger.debug("Created `Config` from %s", path)
         return config
 
@@ -56,11 +72,13 @@ class Config:
         """
         if not isinstance(other, type(self)):
             return NotImplemented
+
         new = Config(
             types=self.types | other.types,
             type_prefixes=self.type_prefixes | other.type_prefixes,
             type_nicknames=self.type_nicknames | other.type_nicknames,
             ignore_files=self.ignore_files + other.ignore_files,
+            plugin_paths=self.plugin_paths + other.plugin_paths,
             config_paths=self.config_paths + other.config_paths,
         )
         logger.debug("Merged Config from %s", new.config_paths)
@@ -107,3 +125,8 @@ class Config:
             for value in sequence:
                 if not isinstance(value, str):
                     raise TypeError(f"`{value}` in {field} must be a str")
+
+        for path in mapping["plugin_paths"]:
+            if not path.is_file():
+                raise ValueError(f"plugin file {path} does not exist")
+            assert path.is_absolute()

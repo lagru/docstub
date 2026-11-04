@@ -139,7 +139,7 @@ Adopting docstub on a large codebase may initially generate many errors.
 Two command line options can help addressing these errors gradually:
 
 * `--group-errors` will group identical errors together.
-  This helps identifying common groups of errors that may be addressed in one go.
+  This helps to identify common groups of errors that may be addressed in one go.
 
 * `--allow-errors` puts an upper limit (["ratchet"](https://qntm.org/ratchet)) on the number of allowed errors.
   This way you can adjust the upper bound of allowed errors as they are addressed.
@@ -154,7 +154,7 @@ Feel welcome to [open an issue](https://github.com/scientific-python/docstub/iss
 ## Dealing with typing problems
 
 For various reasons – missing features in docstub, or limitations of Python's typing system – it may not always be possible to correctly type something in a docstring.
-In those cases, you docstub provides a few approaches to dealing with this.
+In those cases, docstub provides a few approaches to dealing with this.
 
 
 ### Use inline type annotation
@@ -199,6 +199,11 @@ class Foo:
     c: int
     d: str
 ```
+
+### Create a plugin
+
+Depending on your problem you might be able to deal with it by hooking directly into Docstub's runtime via a plugin. See [](create_plugin.md) for a guide on writing such a plugin.
+
 
 ### Write a manual stub file
 

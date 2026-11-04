@@ -11,6 +11,7 @@ import keyword
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from textwrap import indent
 from typing import Final, Self
@@ -18,20 +19,15 @@ from typing import Final, Self
 import lark
 import lark.visitors
 
-from ._report import ContextReporter
+from ._cache import LRUMemoryCache
+from ._report import ContextReporter, Stats
 from ._utils import DocstubError
 
 logger: Final[logging.Logger] = logging.getLogger(__name__)
 
 
-grammar_path: Final[Path] = Path(__file__).parent / "doctype.lark"
-
-with grammar_path.open() as file:
-    _grammar: Final[str] = file.read()
-
-# TODO try passing `transformer=DoctypeTransformer()`, may be faster [1]
-# [1] https://lark-parser.readthedocs.io/en/latest/classes.html#:~:text=after%20the%20parse%2C-,but%20faster,-)
-_lark: Final[lark.Lark] = lark.Lark(_grammar, propagate_positions=True)
+DOCTYPE_GRAMMAR_PATH: Final[Path] = Path(__file__).parent / "doctype.lark"
+DOCTYPE_GRAMMAR: Final[str] = DOCTYPE_GRAMMAR_PATH.read_text()
 
 
 def flatten_recursive(iterable):
@@ -98,7 +94,7 @@ class TermKind(enum.StrEnum):
 
 
 class Term(str):
-    """A terminal / symbol representing an atomic part of a doctype.
+    """A terminal / symbol representing an atomic part in an annotation expression.
 
     Attributes
     ----------
@@ -151,9 +147,9 @@ class Term(str):
         return (), kwargs
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Expr:
-    """An expression that forms or is part of a doctype.
+    """An annotation expression.
 
     Parameters
     ----------
@@ -164,7 +160,12 @@ class Expr:
     """
 
     rule: str
-    children: list[Self | Term]
+    children: tuple[Self | Term, ...]
+
+    def __post_init__(self):
+        assert isinstance(self.rule, str)
+        assert self.rule
+        assert isinstance(self.children, tuple)
 
     @property
     def terms(self):
@@ -184,7 +185,7 @@ class Expr:
         -------
         names : list of Term
         """
-        return [term for term in self.terms if term.kind == TermKind.NAME]
+        return self.filter(kind=TermKind.NAME)
 
     @property
     def sub_expressions(self):
@@ -223,7 +224,7 @@ class Expr:
         formatted_children = ",\n".join(formatted_children)
         formatted_children = indent(formatted_children, prefix="  ")
         return (
-            f"{type(self).__name__}({self.rule!r}, children=[\n{formatted_children}])"
+            f"{type(self).__name__}({self.rule!r}, children=(\n{formatted_children}))"
         )
 
     def print_tree(self):
@@ -239,6 +240,55 @@ class Expr:
     def as_code(self) -> str:
         return str(self)
 
+    def replace(self, old, new):
+        """
+        Parameters
+        ----------
+        old : Expr or Term
+        new : Expr or Term
+
+        Returns
+        -------
+        replaced : Expr
+        """
+        cls = type(self)
+        new_children = []
+        for child in self.children:
+            if isinstance(child, cls):
+                child = child.replace(old, new)  # noqa: PLW2901
+            if child == old:
+                child = new  # noqa: PLW2901
+            new_children.append(child)
+        return cls(rule=self.rule, children=tuple(new_children))
+
+    def filter(self, func=None, /, **attributes):
+        """Filter children of the expression recursively.
+
+        Parameters
+        ----------
+        func : Callable, optional
+            Only return children for which ``func(child)`` is true.
+        attributes : Any
+            Only return children for which have an attribute with a matching
+            value.
+
+        Yields
+        ------
+        match : Expr or Term
+        """
+        for child in self.children:
+            matches = True
+            if func:
+                matches = func(child)
+            for name, value in attributes.items():
+                if not hasattr(child, name) or getattr(child, name) != value:
+                    matches = False
+                    break
+            if matches:
+                yield child
+            if hasattr(child, "filter"):
+                yield from child.filter(func, **attributes)
+
 
 BLACKLISTED_QUALNAMES: Final[set[str]] = set(keyword.kwlist) - {"None", "True", "False"}
 
@@ -253,7 +303,9 @@ class DoctypeTransformer(lark.visitors.Transformer):
 
     Examples
     --------
-    >>> tree = _lark.parse("int or tuple of (int, ...)")
+    >>> import lark
+    >>> parser = lark.Lark(DOCTYPE_GRAMMAR, propagate_positions=True)
+    >>> tree = parser.parse("int or tuple of (int, ...)")
     >>> transformer = DoctypeTransformer()
     >>> str(transformer.transform(tree=tree))
     'int | tuple[int, ...]'
@@ -278,7 +330,7 @@ class DoctypeTransformer(lark.visitors.Transformer):
         -------
         out : Expr
         """
-        return Expr(rule="start", children=tree.children)
+        return Expr(rule="start", children=tuple(tree.children))
 
     def qualname(self, tree):
         """
@@ -315,7 +367,7 @@ class DoctypeTransformer(lark.visitors.Transformer):
         """
         # Drop rst_prefix
         children = [c for c in tree.children if isinstance(c, Term)]
-        expr = Expr(rule="rst_role", children=children)
+        expr = Expr(rule="rst_role", children=tuple(children))
         return expr
 
     def ELLIPSES(self, token):
@@ -341,7 +393,8 @@ class DoctypeTransformer(lark.visitors.Transformer):
         out : Expr
         """
         sep = Term(" | ", kind=TermKind.SYNTAX)
-        expr = Expr(rule="union", children=insert_between(tree.children, sep=sep))
+        children = insert_between(tree.children, sep=sep)
+        expr = Expr(rule="union", children=tuple(children))
         return expr
 
     def subscription(self, tree):
@@ -373,7 +426,7 @@ class DoctypeTransformer(lark.visitors.Transformer):
             *insert_between(tree.children, sep=sep),
             Term("]", kind=TermKind.SYNTAX),
         ]
-        expr = Expr(rule="param_spec", children=children)
+        expr = Expr(rule="param_spec", children=tuple(children))
         return expr
 
     def callable(self, tree):
@@ -443,6 +496,7 @@ class DoctypeTransformer(lark.visitors.Transformer):
         assert not other
         kind = TermKind.LITERAL
         if isinstance(item, Term):
+            # Preserve kind=Name for qualnames in literal expressions
             kind = item.kind
         out = Term(item, kind=kind, pos=(tree.meta.start_pos, tree.meta.end_pos))
         return out
@@ -497,7 +551,7 @@ class DoctypeTransformer(lark.visitors.Transformer):
         -------
         out : Expr
         """
-        return Expr(rule="dtype", children=tree.children)
+        return Expr(rule="dtype", children=tuple(tree.children))
 
     def shape(self, tree):
         """
@@ -538,7 +592,8 @@ class DoctypeTransformer(lark.visitors.Transformer):
         logger.debug("dropping extra info")
         return lark.Discard
 
-    def _format_subscription(self, sequence, *, rule):
+    @staticmethod
+    def _format_subscription(sequence, *, rule):
         """Format a `name[...]` style expression.
 
         Parameters
@@ -565,39 +620,137 @@ class DoctypeTransformer(lark.visitors.Transformer):
         else:
             children = [container]
 
-        expr = Expr(rule=rule, children=children)
+        expr = Expr(rule=rule, children=tuple(children))
         return expr
 
 
-def parse_doctype(doctype, *, reporter=None):
-    """Turn a type description in a docstring into a type annotation.
+class DoctypeTranspiler:
+    """Transpile a :term:`doctype` into a structured expression.
+
+    This is could be a simple function, but as a class dependency injection with
+    custom grammars or transformers is made easier.
 
     Parameters
     ----------
-    doctype : str
-        The doctype to parse.
+    grammar : str, optional
+        Use custom grammar to parse doctypes. You can reuse parts of the
+        default grammar (see ``DOCTYPE_GRAMMAR_PATH`) with
+        ``%import doctype (start, ...)``. Defaults to ``DOCTYPE_GRAMMAR``.
+    grammar_import_paths : tuple of (Path, ...)
+        Additional paths to directories with grammars that are imported in
+        `grammar`.
+    transformer : lark.visitors.Transformer, optional
+        Use a custom transformer to transform the parsed tree.
     reporter : ~.ContextReporter, optional
-
-    Returns
-    -------
-    parsed : Expr
-
-    Raises
-    ------
-    lark.exceptions.VisitError
-        Raised when the transformation is interrupted by an exception.
-        See :class:`lark.exceptions.VisitError`.
-    BlacklistedQualname
-        Raised when a qualname is a forbidden keyword.
+        Pass file and line context for logging.
+    max_cache_size : int, optional
+        Size of the LRU cache used to cache transpiled doctypes. Setting it
+        to 0, disables the cache.
 
     Examples
     --------
-    >>> parse_doctype("tuple of (int, ...)")
+    >>> transpile = DoctypeTranspiler()
+    >>> transpile("tuple of (int, ...)")
     <Expr: 'tuple[int, ...]' rule='start'>
-    >>> parse_doctype("ndarray of dtype (float or int)")
+    >>> transpile("ndarray of dtype (float or int)")
     <Expr: 'ndarray[float | int]' rule='start'>
     """
-    tree = _lark.parse(doctype)
-    transformer = DoctypeTransformer(reporter=reporter)
-    expression = transformer.transform(tree=tree)
-    return expression
+
+    def __init__(
+        self,
+        *,
+        grammar=None,
+        grammar_import_paths=(DOCTYPE_GRAMMAR_PATH.parent,),
+        transformer=None,
+        reporter=None,
+        max_cache_size=1000,
+    ):
+        if grammar is None:
+            grammar = DOCTYPE_GRAMMAR
+
+        default_transformer = DoctypeTransformer(reporter=reporter)
+        if transformer is None:
+            transformer = default_transformer
+
+        if grammar != DOCTYPE_GRAMMAR:
+            # A custom grammar may import the existing doctype grammar. In that
+            # case Lark will put imported rules into their own "doctype__" prefixed
+            # namespace. By providing `DoctypeTransformer` for that namespace we
+            # make it work.
+            transformer = lark.visitors.merge_transformers(
+                transformer, doctype=default_transformer
+            )
+
+        self.max_cache_size = max_cache_size
+        self.reporter = reporter or ContextReporter(logger=logger)
+        self._stats = Stats()
+        self._grammar = grammar
+        self._grammar_import_paths = grammar_import_paths
+        self._transformer = transformer
+
+        # Can't easily use `lru_cache` here because it should not be applied to
+        # methods (B19, https://docs.astral.sh/ruff/rules/cached-instance-method).
+        # An awkward workaround, assigning the LRU wrapper to the instance
+        # instead of class, wouldn't be pickle-able.
+        self._lru_cache = LRUMemoryCache(maxsize=max_cache_size)
+
+    def __call__(self, doctype):
+        """Transpile single doctype into a structured expression.
+
+        Parameters
+        ----------
+        doctype : str
+
+        Returns
+        -------
+        parsed : Expr
+
+        Raises
+        ------
+        lark.exceptions.VisitError
+            Raised when the transformation is interrupted by an exception.
+            See :cls:`lark.exceptions.VisitError`.
+        BlacklistedQualname
+            Raised when a qualname is a forbidden keyword.
+        """
+        if doctype in self._lru_cache:
+            self._stats.inc_counter("doctype_transpiler_cache_hits")
+            return self._lru_cache[doctype]
+
+        tree = self._parser.parse(doctype)
+        expression = self._transformer.transform(tree=tree)
+        assert isinstance(expression, Expr)
+
+        self._lru_cache[doctype] = expression
+        self._stats.inc_counter("doctype_transpiler_cache_misses")
+        return expression
+
+    @property
+    def stats(self):
+        self._stats.append_to_list(
+            "doctype_transpiler_curr_cache_size", len(self._lru_cache)
+        )
+        return self._stats
+
+    @cached_property
+    def _parser(self):
+        """Initialize Lark parser.
+
+        Use a cached property to construct the lark parser as few times as
+        possible just before use. Doing that in the ``__init__`` doesn't work
+        because :class:`lark.Lark` is not pickle-able; and we want to pickle
+        this class for dependency injection before forking.
+
+        Returns
+        -------
+        parser : lark.Lark
+        """
+        # TODO If we used an LARL conforming grammar we could pass the `transformer`
+        #  directly here which should be faster [1]
+        # [1] https://lark-parser.readthedocs.io/en/latest/classes.html#lark:~:text=faster
+        parser = lark.Lark(
+            grammar=self._grammar,
+            propagate_positions=True,
+            import_paths=list(self._grammar_import_paths),
+        )
+        return parser

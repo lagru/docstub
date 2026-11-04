@@ -3,8 +3,9 @@
 import enum
 import keyword
 import logging
-from collections.abc import Generator, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from textwrap import indent
 from typing import Any, Final, Self
@@ -13,17 +14,14 @@ import lark
 import lark.visitors
 from _typeshed import Incomplete
 
-from ._report import ContextReporter
+from ._cache import LRUMemoryCache
+from ._report import ContextReporter, Stats
 from ._utils import DocstubError
 
 logger: Final[logging.Logger]
 
-grammar_path: Final[Path]
-
-with grammar_path.open() as file:
-    _grammar: Final[str]
-
-_lark: Final[lark.Lark]
+DOCTYPE_GRAMMAR_PATH: Final[Path]
+DOCTYPE_GRAMMAR: Final[str]
 
 def flatten_recursive(iterable: Iterable[Iterable | str]) -> Generator[str]: ...
 def insert_between(iterable: Iterable, *, sep: Any) -> list[Any]: ...
@@ -46,12 +44,13 @@ class Term(str):
     def __repr__(self) -> str: ...
     def __getnewargs_ex__(self) -> tuple[tuple[Any, ...], dict[str, Any]]: ...
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class Expr:
 
     rule: str
-    children: list[Self | Term]
+    children: tuple[Self | Term, ...]
 
+    def __post_init__(self) -> None: ...
     @property
     def terms(self) -> list[Term]: ...
     @property
@@ -64,6 +63,10 @@ class Expr:
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def as_code(self) -> str: ...
+    def replace(self, old: Expr | Term, new: Expr | Term) -> Expr: ...
+    def filter(
+        self, func: Callable | None = ..., /, **attributes: Any
+    ) -> Generator[Expr | Term]: ...
 
 BLACKLISTED_QUALNAMES: Final[set[str]]
 
@@ -90,6 +93,21 @@ class DoctypeTransformer(lark.visitors.Transformer):
     def shape(self, tree: lark.Tree) -> lark.visitors._DiscardType: ...
     def optional_info(self, tree: lark.Tree) -> lark.visitors._DiscardType: ...
     def extra_info(self, tree: lark.Tree) -> lark.visitors._DiscardType: ...
-    def _format_subscription(self, sequence: Sequence[str], *, rule: str) -> Expr: ...
+    @staticmethod
+    def _format_subscription(sequence: Sequence[str], *, rule: str) -> Expr: ...
 
-def parse_doctype(doctype: str, *, reporter: ContextReporter | None = ...) -> Expr: ...
+class DoctypeTranspiler:
+    def __init__(
+        self,
+        *,
+        grammar: str | None = ...,
+        grammar_import_paths: tuple[Path, ...] = ...,
+        transformer: lark.visitors.Transformer | None = ...,
+        reporter: ContextReporter | None = ...,
+        max_cache_size: int = ...,
+    ) -> None: ...
+    def __call__(self, doctype: str) -> Expr: ...
+    @property
+    def stats(self) -> None: ...
+    @cached_property
+    def _parser(self) -> lark.Lark: ...

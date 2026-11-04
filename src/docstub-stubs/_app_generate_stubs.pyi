@@ -1,5 +1,6 @@
 # File generated with docstub
 
+import importlib.util
 import logging
 import sys
 import time
@@ -7,8 +8,12 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import Literal
 
+import pluggy
+
+from . import doctype, plugins
 from ._analysis import PyImport, TypeCollector, TypeMatcher, common_known_types
 from ._cache import CACHE_DIR_NAME, FileCache
 from ._concurrency import LoggingProcessExecutor, guess_concurrency_params
@@ -21,12 +26,17 @@ from ._path_utils import (
 )
 from ._report import Stats, setup_logging
 from ._stubs import Py2StubTransformer, try_format_stub
+from ._utils import escape_qualname
 from ._version import __version__
 
 logger: logging.Logger
 
 def cache_dir_in_cwd() -> Path: ...
 def _load_configuration(config_paths: list[Path] | None = ...) -> Config: ...
+def _import_standalone_module_from_path(
+    path: Path, *, module_name: str | None = ...
+) -> ModuleType: ...
+def _load_plugins(paths: Iterable[Path] = ...) -> pluggy.PluginManager: ...
 def _collect_type_info(
     root_path: Path, *, ignore: Sequence[str] = ..., cache: bool = ...
 ) -> tuple[dict[str, PyImport], dict[str, PyImport]]: ...

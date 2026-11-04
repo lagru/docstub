@@ -7,6 +7,10 @@
 ignore_files = []
 
 
+# Register docstub plugins at these file paths.
+plugin_paths = []
+
+
 # Types and their external modules to use in docstrings.
 # Docstub can't yet automatically discover where to import types from other
 # packages from. Instead, you can provide this information explicitly.
