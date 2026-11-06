@@ -17,8 +17,12 @@ _annotation_with_meta: _type ("," optional_info)?
 
 // A type annotation. Can range from a simple qualified name to a complex
 // nested construct of types.
-_type: qualname
-    | union
+_type: _type_without_union | union
+
+
+// Used in `union` to prevent directly nested unions. Without
+// `a | b | c` is parsed as `union(a, union(b, c))`.
+_type_without_union: qualname
     | literal
     | subscription
     | callable
@@ -38,7 +42,7 @@ qualname: (/~/ ".")? (NAME ".")* NAME
 
 
 // An union of different types, joined either by "or" or "|".
-union: _type (_OR _type)+
+union: _type_without_union (_OR _type_without_union)+
 
 
 // Operator used in unions.
@@ -46,7 +50,9 @@ _OR: "or" | "|"
 
 
 // An expression where an object is subscribed with "A[v, ...]".
-subscription: qualname "[" _type ("," _type)* ("," ELLIPSES)? "]"
+// Assign higher priority (`.1`) so it wins over the `literal` rule which has
+// overlap with this one. See description for `literal_item` for more.
+subscription.1: qualname "[" _type ("," _type)* ("," ELLIPSES)? "]"
 
 
 // An expression describing a callable like "Callable[[int], str]"
@@ -70,10 +76,8 @@ natlang_literal: "{" literal_item ("," literal_item)* "}"
 
 
 // A literal expression as supported by Python proper. The rule "subscription"
-// isn't allowed to contain "literal_items", so we need to define this.
-// Assign a higher priority so that things like `Literal[Some.ENUM]` is marked
-// as a literal expression.
-literal.1: qualname "[" literal_item ("," literal_item)* "]"
+// isn't allowed to contain "literal_items", so this rule covers that case.
+literal: qualname "[" literal_item ("," literal_item)* "]"
 
 
 // An single item in a literal expression (or `optional`). We must also allow
@@ -111,7 +115,7 @@ natlang_array: array_name "of dtype" dtype ("and shape" shape)?
     | array_name "of shape" shape ("and dtype" dtype)?
 
 
-// Currently a bit of a hack. Since the `array_expression` is ambiguous, we
+// Currently a bit of a hack. Since `natlang_array` is ambiguous, we
 // want to make sure it only works for real arrays. For now, we are using a
 // hack here, that only allows specific names in `array_name`. In the
 // transformer we alias this to qualname.
@@ -122,30 +126,30 @@ ARRAY_NAME: "array" | "ndarray" | "array-like" | "array_like"
 
 
 // The dtype used in an array expression.
-dtype: qualname | "(" union ")"
+dtype: qualname | dtype_to_expand
+
+
+// Dtypes may be specified as a union. But I'm not sure if `np.dtype` accepts
+// a union. So we use expansion here instead.
+dtype_to_expand: "(" qualname (_OR qualname)+ ")"
 
 
 // The shape used in an array expression. Possibly to liberal right now in
 // what it allows. Since there is currently no support to type the shape of
 // NumPy arrays, this information is dropped during the transformation.
-shape: "(" dim ",)"
-    | "(" leading_optional_dim? dim (("," dim | insert_optional_dim))* ")"
-    | INT "-"? "D"
+shape: "()"
+    | "(" dim ",)"
+    | "(" "[" optional_dimensions "," "]" dim ")"
+    | "(" ("[" optional_dimensions "," "]")? dim ("," dim | "[" "," optional_dimensions "]")+ ")"
 
 
-// Optional dimensions in a `shape` expression placed at the start,
-// e.g., `([3 ,] N)`.
-?leading_optional_dim: "[" dim ("," dim)* ",]"
-
-
-// Optional dimensions in a `shape` expression placed anywhere but the start,
-// e.g., `(A[, B], C[, D])`.
-?insert_optional_dim: "[," dim ("," dim)* "]"
+// An optional dimension used inside a `shape` rule
+optional_dimensions: dim ("," dim)*
 
 
 // Dimension can be a number, ellipses ('...') or a simple name. A simple name
 // can be bound to a specific number, e.g. `N=3`.
-?dim: INT | ELLIPSES | NAME ("=" INT)?
+dim: INT | ELLIPSES | NAME ("=" INT)?
 
 
 // Optional meta information added after the docstring annotation, e.g.

@@ -1,16 +1,17 @@
 import logging
-from itertools import product
 
 import lark
 import lark.exceptions
 import pytest
 
 from docstub.doctype import (
-    BLACKLISTED_QUALNAMES,
+    FORBIDDEN_KEYWORDS,
     DoctypeTransformer,
     DoctypeTranspiler,
     Expr,
+    QualnameIsForbidden,
     Term,
+    expand_expression,
     insert_between,
 )
 
@@ -37,9 +38,11 @@ class Test_DoctypeTranspiler:
         with pytest.raises(lark.exceptions.UnexpectedInput):
             DoctypeTranspiler()(doctype)
 
-    @pytest.mark.parametrize("doctype", BLACKLISTED_QUALNAMES)
-    def test_reserved_keywords(self, doctype):
-        with pytest.raises(lark.exceptions.VisitError):
+    @pytest.mark.parametrize("keyword", FORBIDDEN_KEYWORDS)
+    @pytest.mark.parametrize("template", ["{}", "Literal[{}]"])
+    def test_reserved_keywords(self, keyword, template):
+        doctype = template.format(keyword)
+        with pytest.raises(QualnameIsForbidden, match=keyword):
             DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize(
@@ -52,31 +55,21 @@ class Test_DoctypeTranspiler:
     def test_natlang_union(self, doctype, expected):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
+        assert expr.find_one(rule="union")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
         [
-            # Conventional
             ("list[float]", "list[float]"),
             ("dict[str, Union[int, str]]", "dict[str, Union[int, str]]"),
             ("tuple[int, ...]", "tuple[int, ...]"),
             ("Sequence[int | float]", "Sequence[int | float]"),
-            # Natural language variant with "of" and optional plural "(s)"
-            ("list of int", "list[int]"),
-            ("list of int(s)", "list[int]"),
-            # Natural tuple variant
-            ("tuple of (float, int, str)", "tuple[float, int, str]"),
-            ("tuple of (float, ...)", "tuple[float, ...]"),
-            # Natural dict variant
-            ("dict of {str: int}", "dict[str, int]"),
-            ("dict of {str: int | float}", "dict[str, int | float]"),
-            ("dict of {str: int or float}", "dict[str, int | float]"),
-            ("dict[list of str]", "dict[list[str]]"),
         ],
     )
     def test_subscription(self, doctype, expected):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
+        assert expr.find_all(rule="subscription")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -85,7 +78,6 @@ class Test_DoctypeTranspiler:
             ("list of int", "list[int]"),
             ("list of int(s)", "list[int]"),
             ("list of (int or float)", "list[int | float]"),
-            ("list of (list of int)", "list[list[int]]"),
             # Natural tuple variant
             ("tuple of (float, int, str)", "tuple[float, int, str]"),
             ("tuple of (float, ...)", "tuple[float, ...]"),
@@ -93,16 +85,27 @@ class Test_DoctypeTranspiler:
             ("dict of {str: int}", "dict[str, int]"),
             ("dict of {str: int | float}", "dict[str, int | float]"),
             ("dict of {str: int or float}", "dict[str, int | float]"),
-            # Nesting is possible but probably rarely a good idea
+        ],
+    )
+    def test_natlang_container(self, doctype, expected):
+        expr = DoctypeTranspiler()(doctype)
+        assert expr.as_code() == expected
+        assert expr.find_one(rule="natlang_container"), expr.format_tree()
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("list of (list of int)", "list[list[int]]"),
             ("list of (list of int(s))", "list[list[int]]"),
             ("tuple of (tuple of (float, ...), ...)", "tuple[tuple[float, ...], ...]"),
             ("dict of {str: dict of {str: float}}", "dict[str, dict[str, float]]"),
             ("dict of {str: list of (list of int(s))}", "dict[str, list[list[int]]]"),
         ],
     )
-    def test_natlang_container(self, doctype, expected):
+    def test_nested_natlang_container(self, doctype, expected):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
+        assert len(expr.find_all(rule="natlang_container")) > 1
 
     @pytest.mark.parametrize(
         "doctype",
@@ -124,29 +127,40 @@ class Test_DoctypeTranspiler:
             DoctypeTranspiler()(doctype)
 
     @pytest.mark.parametrize(
-        ("doctype"),
+        "doctype",
         [
             "Literal[0]",
             "Literal[-1, 1]",
-            "Literal[None]",
-            "Literal[True, False]",
+            "Literal[-2., 1.5]",
             """Literal['a', "bar"]""",
             # Enum
-            "Literal[SomeEnum.FIRST]",
             "Literal[SomeEnum.FIRST, 1]",
             "Literal[SomeEnum.FIRST, 2]",
             "Literal[SomeEnum.FIRST, 3]",
             # Nesting
             "dict[Literal['a', 'b'], int]",
-            # Custom qualname for literal
-            "MyLiteral[0]",
-            "MyLiteral[SomeEnum.FIRST]",
         ],
     )
     def test_literals(self, doctype):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
-        assert "literal" in [e.rule for e in expr.sub_expressions]
+        assert expr.find_one(rule="literal")
+
+    @pytest.mark.parametrize(
+        "doctype",
+        [
+            "Literal[None]",
+            "Literal[True, False]",
+            # Enum
+            "Literal[SomeEnum.FIRST]",
+        ],
+    )
+    def test_literal_only_qualnames(self, doctype):
+        """Parsed as a subscription because it only contains qualnames."""
+        expr = DoctypeTranspiler()(doctype)
+        assert expr.as_code() == doctype
+        assert expr.find_one(rule="subscription")
+        assert not expr.find_all(rule="literal")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -166,18 +180,18 @@ class Test_DoctypeTranspiler:
             # These aren't officially valid as an argument to `Literal` (yet)
             # https://typing.python.org/en/latest/spec/literal.html
             # TODO figure out how docstub should deal with these
-            ("{-2., 1.}", "Literal[-2., 1.]"),
+            ("{-2., 1.5}", "Literal[-2., 1.5]"),
             pytest.param(
                 "{-inf, inf, nan}",
-                "Literal[, 1.]",
-                marks=pytest.mark.xfail(reason="unsure how to support"),
+                "Literal[-inf, inf, nan]",
+                marks=pytest.mark.xfail(reason="unsure if to support"),
             ),
         ],
     )
     def test_natlang_literals(self, doctype, expected):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
-        assert "natlang_literal" in [e.rule for e in expr.sub_expressions]
+        assert expr.find_one(rule="natlang_literal")
 
     def test_single_natlang_literal_warning(self, caplog):
         expr = DoctypeTranspiler()("{True}")
@@ -193,7 +207,6 @@ class Test_DoctypeTranspiler:
         ("doctype", "expected"),
         [
             ("int", "int"),
-            ("int | None", "int | None"),
             ("tuple of (int, float)", "tuple[int, float]"),
             ("{'a', 'b'}", "Literal['a', 'b']"),
         ],
@@ -215,6 +228,7 @@ class Test_DoctypeTranspiler:
         doctype_with_optional = doctype + optional_info
         expr = DoctypeTranspiler()(doctype_with_optional)
         assert expr.as_code() == expected
+        assert not expr.find_all(rule="optional_info")
 
     @pytest.mark.parametrize(
         "doctype",
@@ -230,7 +244,7 @@ class Test_DoctypeTranspiler:
     def test_callable(self, doctype):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
-        assert "callable" in [e.rule for e in expr.sub_expressions]
+        assert expr.find_one(rule="callable")
 
     @pytest.mark.parametrize(
         "doctype",
@@ -243,7 +257,7 @@ class Test_DoctypeTranspiler:
     def test_callable_subscriptions_form(self, doctype):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == doctype
-        assert "callable" not in [e.rule for e in expr.sub_expressions]
+        assert not expr.find_all(rule="callable")
 
     @pytest.mark.parametrize(
         "doctype",
@@ -271,74 +285,136 @@ class Test_DoctypeTranspiler:
     def test_rst_role(self, doctype, expected):
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
+        assert expr.find_one(rule="rst_role")
 
-    # fmt: off
+
+class Test_DoctypeTranspiler_arrays:
     @pytest.mark.parametrize(
-        ("fmt", "expected_fmt"),
+        ("in_shape", "out_shape"),
         [
-            ("{name} of shape {shape} and dtype {dtype}", "{name}[{dtype}]"),
-            ("{name} of dtype {dtype} and shape {shape}", "{name}[{dtype}]"),
+            # Exact dimensionality
+            ("()", "tuple[()]"),  # Special case: 0-D
+            ("(M,)", "tuple[int]"),
+            ("(M=3,)", "tuple[int]"),
+            ("(2,)", "tuple[int]"),
+            ("(M, N)", "tuple[int, int]"),
+            ("(M, N, O)", "tuple[int, int, int]"),
+            ("(0, 1, 2)", "tuple[int, int, int]"),
+            # Ellipsis expands to unconstraint shape
+            ("(M, ...)", "tuple[Any, ...]"),
+            ("(0, ...)", "tuple[Any, ...]"),
+            ("(..., M)", "tuple[Any, ...]"),
+            ("(M, ..., N)", "tuple[Any, ...]"),
+            ("(M[, ...], N)", "tuple[Any, ...]"),
         ],
     )
-    @pytest.mark.parametrize("name", ["array", "ndarray", "array-like", "array_like"])
-    @pytest.mark.parametrize("dtype", ["int", "np.int8"])
-    @pytest.mark.parametrize("shape",
-        ["(2, 3)", "(N, m)", "3D", "2-D", "(N, ...)", "([P,] M, N)"]
-     )
-    def test_natlang_array(self, fmt, expected_fmt, name, dtype, shape):
-        doctype = fmt.format(name=name, dtype=dtype, shape=shape)
-        expected = expected_fmt.format(name=name, dtype=dtype, shape=shape)
+    def test_explicit_shape(self, in_shape, out_shape):
+        """Cases where the shape describes the exact dimensionality"""
+        doctype = f"ndarray of shape {in_shape}"
+        expected = f"ndarray[{out_shape}]"
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
-        assert "natlang_array" in [e.rule for e in expr.sub_expressions]
-    # fmt: on
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
         [
-            ("ndarray of dtype (int or float)", "ndarray[int | float]"),
-            ("ndarray of shape (M, N)", "ndarray"),
+            (
+                "ndarray of shape (M[, N])",
+                "ndarray[tuple[int]] | ndarray[tuple[int, int]]",
+            ),
+            (
+                "ndarray of shape ([M, ]N)",
+                "ndarray[tuple[int]] | ndarray[tuple[int, int]]",
+            ),
+            (
+                "ndarray of shape ([N,] M [,O])",
+                "ndarray[tuple[int]]"
+                " | ndarray[tuple[int, int]]"
+                " | ndarray[tuple[int, int, int]]",
+            ),
+            (
+                "ndarray of shape (M[, N, O], P)",
+                "ndarray[tuple[int, int]]"
+                " | ndarray[tuple[int, int, int]]"
+                " | ndarray[tuple[int, int, int, int]]",
+            ),
         ],
     )
-    def test_natlang_array_specific(self, doctype, expected):
+    def test_optional_shape(self, doctype, expected):
+        """Optional dimensions are expanded into union of matching arrays."""
         expr = DoctypeTranspiler()(doctype)
         assert expr.as_code() == expected
-        assert "natlang_array" in [e.rule for e in expr.sub_expressions]
 
-    @pytest.mark.parametrize("shape", ["(-1, 3)", "(1.0, 2)", "-3D", "-2-D"])
-    def test_natlang_array_invalid_shape(self, shape):
-        doctype = f"array of shape {shape}"
-        with pytest.raises(lark.exceptions.UnexpectedInput):
-            _ = DoctypeTranspiler()(doctype)
+    @pytest.mark.parametrize("shape", ["(N)", "(2)", "(-1, 3)", "(1.0, 2)"])
+    def test_malformed_shape(self, shape):
+        doctype = f"ndarray of shape {shape}"
+        with pytest.raises(lark.LexError, match="No terminal matches"):
+            DoctypeTranspiler()(doctype)
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            ("ndarray of dtype int", "ndarray[tuple[Any, ...], np.dtype[int]]"),
+            (
+                "ndarray of dtype (int or float)",
+                "ndarray[tuple[Any, ...], np.dtype[int]]"
+                " | ndarray[tuple[Any, ...], np.dtype[float]]",
+            ),
+            (
+                "ndarray of dtype (int | float | complex)",
+                "ndarray[tuple[Any, ...], np.dtype[int]]"
+                " | ndarray[tuple[Any, ...], np.dtype[float]]"
+                " | ndarray[tuple[Any, ...], np.dtype[complex]]",
+            ),
+        ],
+    )
+    def test_dtype(self, doctype, expected):
+        expr = DoctypeTranspiler()(doctype)
+        assert expr.as_code() == expected
+
+    @pytest.mark.parametrize(
+        ("doctype", "expected"),
+        [
+            (
+                "ndarray of dtype int and shape (M, N)",
+                "ndarray[tuple[int, int], np.dtype[int]]",
+            ),
+            (
+                "ndarray of dtype (int or float) and shape ([N,] M)",
+                "ndarray[tuple[int], np.dtype[int]]"
+                " | ndarray[tuple[int], np.dtype[float]]"
+                " | ndarray[tuple[int, int], np.dtype[int]]"
+                " | ndarray[tuple[int, int], np.dtype[float]]",
+            ),
+        ],
+    )
+    def test_shape_and_dtype(self, doctype, expected):
+        expr = DoctypeTranspiler()(doctype)
+        assert expr.as_code() == expected
+
+    @pytest.mark.parametrize(
+        "fmt",
+        [
+            "{name} of shape {shape} and dtype {dtype}",
+            "{name} of dtype {dtype} and shape {shape}",
+        ],
+    )
+    @pytest.mark.parametrize("name", ["array-like", "array_like"])
+    @pytest.mark.parametrize("dtype", ["int", "np.int8"])
+    @pytest.mark.parametrize("shape", ["(2, 3)", "(N, m)", "(N, ...)", "([P,] M, N)"])
+    def test_natlang_array_like(self, fmt, name, dtype, shape):
+        doctype = fmt.format(name=name, dtype=dtype, shape=shape)
+        expr = DoctypeTranspiler()(doctype)
+        assert expr.as_code() == name
+        assert expr.find_one(rule="natlang_array")
 
 
 class Test_DoctypeTranspiler_override:
     @pytest.mark.parametrize(
         ("doctype", "expected"),
         [
-            ("ndarray of dtype uint8 or int", "ndarray[uint8] | int"),
-            ("ndarray of dtype in {uint8, uint16}", "ndarray[uint8 | uint16]"),
-            # ("ndarray of dtype (uint8, uint16)", "ndarray[uint8 | uint16]"),
-        ],
-    )
-    def test_in_dtype(self, doctype, expected):
-        grammar = """
-        %import doctype (start, dtype, qualname, WS_INLINE)
-        dtype_union : "in {" qualname ("," qualname)+ "}" -> union
-        %override dtype: qualname | dtype_union
-        %ignore WS_INLINE
-        """
-        transpile = DoctypeTranspiler(grammar=grammar)
-        expr = transpile(doctype)
-        assert expr.as_code() == expected
-        assert "natlang_array" in [e.rule for e in expr.sub_expressions]
-        assert "dtype" in [e.rule for e in expr.sub_expressions]
-
-    @pytest.mark.parametrize(
-        ("doctype", "expected"),
-        [
-            ("my_array of dtype int", "my_array[int]"),
-            ("my_array of shape (4, 4)", "my_array"),
+            ("my_array of dtype int", "my_array[tuple[Any, ...], np.dtype[int]]"),
+            ("my_array of shape (4,)", "my_array[tuple[int]]"),
         ],
     )
     def test_doc_example_new_array_name(self, doctype, expected):
@@ -350,7 +426,7 @@ class Test_DoctypeTranspiler_override:
         transpile = DoctypeTranspiler(grammar=grammar)
         expr = transpile(doctype)
         assert expr.as_code() == expected
-        assert len(list(expr.filter(rule="natlang_array"))) == 1
+        assert expr.find_one(rule="natlang_array")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -371,20 +447,20 @@ class Test_DoctypeTranspiler_override:
         transpile = DoctypeTranspiler(transformer=Transformer())
         expr = transpile(doctype)
         assert expr.as_code() == expected
-        assert "union" in [e.rule for e in expr.sub_expressions]
+        assert expr.find_all(rule="union")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
         [
-            ("(int) -> bool", "Callable[[int], bool]"),
-            ("(str, bytes) -> int or bool", "Callable[[str, bytes], int | bool]"),
+            ("f(int) -> bool", "Callable[[int], bool]"),
+            ("f(str, bytes) -> int or bool", "Callable[[str, bytes], int | bool]"),
         ],
     )
     def test_natlang_callable(self, doctype, expected):
         grammar = """
         %import doctype (start, _type, WS_INLINE)
         params: _type ("," _type)*
-        natlang_callable : "(" params ") ->" _type
+        natlang_callable : "f(" params ") ->" _type
         %extend _type: natlang_callable
         %ignore WS_INLINE
         """
@@ -406,7 +482,7 @@ class Test_DoctypeTranspiler_override:
 
             def natlang_callable(self, children):
                 items = [Term("Callable", kind="name"), *children]
-                out = DoctypeTransformer._format_subscription(
+                out = DoctypeTransformer._create_subscription_expr(
                     items, rule="natlang_callable"
                 )
                 return out
@@ -414,8 +490,8 @@ class Test_DoctypeTranspiler_override:
         transpile = DoctypeTranspiler(grammar=grammar, transformer=Transformer())
         expr = transpile(doctype)
         assert expr.as_code() == expected
-        assert "natlang_callable" in [e.rule for e in expr.sub_expressions]
-        assert "params" in [e.rule for e in expr.sub_expressions]
+        assert expr.find_one(rule="natlang_callable")
+        assert expr.find_all(rule="params")
 
     @pytest.mark.parametrize(
         ("doctype", "expected"),
@@ -447,63 +523,14 @@ class Test_DoctypeTranspiler_override:
                 -------
                 expr : Expr
                 """
-                children = map(self._expand_expression, tree.children)
-                return Expr(rule="start", children=tuple(children))
-
-            def expansion(self, tree):
-                """Transform "expansion" rule.
-
-                Actual expansion happens in `start` when the complete expression with
-                all potential expansions can be seen.
-
-                Parameters
-                ----------
-                tree : lark.Tree
-
-                Returns
-                -------
-                expr : Expr
-                """
-                return Expr(rule="expansion", children=tuple(tree.children))
-
-            def _expand_expression(self, expr):
-                """Join combination of all expansions in a new union.
-
-                Parameters
-                ----------
-                expr : Expr
-
-                Returns
-                -------
-                expanded : Expr
-                """
-                expansions = expr.filter(rule="expansion")
-                if not expansions:
-                    return expr
-
-                # Create Cartesian product of all expansions where each
-                # value is prefixed by the expansion it will replace
-                expansions = [
-                    [(expansion, value) for value in expansion.children]
-                    for expansion in expansions
-                ]
-                combinations = list(product(*expansions))
-
-                # Create a new expression for each combination
-                interpolated = []
-                for combination in combinations:
-                    new_expr = expr
-                    for expansion, value in combination:
-                        new_expr = new_expr.replace(expansion, value)
-                    interpolated.append(new_expr)
-
-                # Join new expressions as union
-                expanded = self.union(lark.Tree("union", children=interpolated))
-                return expanded
+                assert len(tree.children) == 1
+                assert isinstance(tree.children[0], Expr)
+                child = expand_expression(tree.children[0], expand_rule="expansion")
+                return Expr(rule="start", children=(child,))
 
         transpile = DoctypeTranspiler(
             grammar=grammar, transformer=ExpansionTransformer()
         )
         expr = transpile(doctype)
         assert expr.as_code() == expected
-        assert list(expr.filter(rule="natlang_array")) == []
+        assert not expr.find_all(rule="expansion")
