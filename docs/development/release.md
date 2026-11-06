@@ -12,7 +12,7 @@ Generate a [read-only GitHub token](https://github.com/settings/personal-access-
 pip install changelist
 
 RELEASE_TAG=...       # like  1.1.0 (without `v` prefix)
-PREV_TAG=...          # like v1.0.0 
+PREV_TAG=...          # like v1.0.0
 export GH_TOKEN=...
 
 changelist scientific-python/docstub \
