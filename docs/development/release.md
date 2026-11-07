@@ -11,18 +11,18 @@ Generate a [read-only GitHub token](https://github.com/settings/personal-access-
 ```shell
 pip install changelist
 
-RELEASE_TAG=...
-PREV_TAG=...
+RELEASE_TAG=...       # like  1.1.0 (without `v` prefix)
+PREV_TAG=...          # like v1.0.0
 export GH_TOKEN=...
 
 changelist scientific-python/docstub \
     --version "${RELEASE_TAG}" \
-    --out "doc/release_notes/v${RELEASE_TAG}.md" \
+    --out "docs/release_notes/v${RELEASE_TAG}.md" \
     "${PREV_TAG}" main
 ```
 
-- `RELEASE_TAG` is the tag of the current release (for example `v1.1.0`)
-- `PREV_TAG` is the tag of the previous release (for example `v1.0.0`).
+- `RELEASE_TAG` is the tag of the current release
+- `PREV_TAG` is the tag of the previous release
 
 So changelist will generate notes based on the changes between `${PREV_TAG}..main`.
 
