@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.urls]
-Source = "https://github.com/lagru/docstub"
+Source = "https://github.com/scientific-python/docstub"
 Documentation = "https://docstub.readthedocs.io"
 
 [project.scripts]
