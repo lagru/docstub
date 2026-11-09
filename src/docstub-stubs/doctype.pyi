@@ -3,7 +3,6 @@
 import enum
 import keyword
 import logging
-import warnings
 from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass
 from functools import cached_property
