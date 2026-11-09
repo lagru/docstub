@@ -392,7 +392,7 @@ def generate_stubs(
         logger.warning(
             "The grammar rule 'dtype_to_expand' is deprecated in favor of 'dtype_union'",
             extra={
-                "details": "It will be removed in v0.8.0. Since `numpy.dtype` supports "
+                "details": "It will be removed in v0.9.0. Since `numpy.dtype` supports "
                 "unions, the rule was renamed. Use the rule 'dtype_union' if you want "
                 "to modify this expression in a plugin."
             },

@@ -134,7 +134,7 @@ dtype: qualname | dtype_union | dtype_to_expand
 dtype_union.1: "(" qualname (_OR qualname)+ ")"
 
 
-// DEPRECATED in favor of `dtype_union`, will be removed in v0.8.0.
+// DEPRECATED in favor of `dtype_union`, will be removed in v0.9.0.
 dtype_to_expand: "(" qualname (_OR qualname)+ ")"
 
 
