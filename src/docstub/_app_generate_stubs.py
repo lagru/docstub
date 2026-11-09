@@ -31,7 +31,7 @@ from ._path_utils import (
     walk_source_package,
 )
 from ._report import Stats, setup_logging
-from ._stubs import Py2StubTransformer, try_format_stub, CstTreeSerializer
+from ._stubs import Py2StubTransformer, try_format_stub
 from ._utils import escape_qualname
 from ._version import __version__
 
